@@ -1,0 +1,44 @@
+# Python
+__pycache__/
+*.py[cod]
+*.sqlite3
+.env
+venv/
+*.log
+instance/
+*.db
+.DS_Store
+
+# FastAPI & general backend stuff
+*.env
+*.local
+*.bak
+.mypy_cache/
+.pytest_cache/
+.idea/
+*.egg-info/
+.env.*
+
+# VS Code
+.vscode/
+
+# Node
+node_modules/
+.next/
+*.log
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# Output folders
+dist/
+build/
+out/
+
+# OS files
+Thumbs.db
+.DS_Store
+ehthumbs.db
+Icon?
+Desktop.ini
