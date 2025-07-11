@@ -10,11 +10,11 @@ from google.auth.transport import requests
 from google.oauth2 import id_token
 from google.auth.exceptions import GoogleAuthError
 from pydantic import BaseModel
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import Session
 from ..utils.logger import setup_logger
-from ..core.database import get_async_db
-from ..crud.user import upsert_user
-from ..schemas import UserCreate, UserResponse
+from ..core.database import get_db
+from ..core.config import settings
+from ..models.user import User
 
 logger = setup_logger(__name__)
 
@@ -94,8 +94,8 @@ google_auth_manager = GoogleAuthManager()
 
 async def get_current_user_from_google_token(
     request: Request,
-    db: AsyncSession = Depends(get_async_db)
-) -> UserResponse:
+    db: Session = Depends(get_db)
+) -> User:
     """
     FastAPI dependency to extract and verify Google access token.
     Also upserts user information to the database.
@@ -142,31 +142,35 @@ async def get_current_user_from_google_token(
     # Verify the token and get user info
     google_user_info = await google_auth_manager.verify_google_token(token)
     
-    # Upsert user in database
+    # Get or create user in database
     try:
-        user_data = UserCreate(
-            email=google_user_info.email,
-            name=google_user_info.name,
-            picture=google_user_info.picture
-        )
+        # Check if user already exists
+        user = db.query(User).filter(User.email == google_user_info.email).first()
         
-        db_user = await upsert_user(db, user_data)
+        if not user:
+            # Create new user - Google OAuth users don't need a password
+            user = User(
+                email=google_user_info.email,
+                full_name=google_user_info.name,
+                hashed_password="",  # Empty password for OAuth users
+                is_active=True
+            )
+            db.add(user)
+            db.commit()
+            db.refresh(user)
+            logger.info(f"New Google OAuth user created: {user.email}")
+        else:
+            # Update existing user's name if provided and different
+            if google_user_info.name and str(user.full_name) != google_user_info.name:
+                user.full_name = google_user_info.name
+                db.commit()
+                db.refresh(user)
+            logger.info(f"Existing Google OAuth user authenticated: {user.email}")
         
-        # Convert to response schema
-        user_response = UserResponse(
-            id=db_user.id,
-            email=db_user.email,
-            name=db_user.name,
-            picture=db_user.picture,
-            created_at=db_user.created_at,
-            last_seen=db_user.last_seen
-        )
-        
-        logger.info(f"User authenticated and upserted: {db_user.email}")
-        return user_response
+        return user
         
     except Exception as e:
-        logger.error(f"Error upserting user {google_user_info.email}: {str(e)}")
+        logger.error(f"Error processing Google OAuth user {google_user_info.email}: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Error processing user authentication",

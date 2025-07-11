@@ -5,11 +5,13 @@ Handles user registration, login, token refresh, and user management.
 
 from datetime import timedelta
 from typing import List
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Request
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
+from pydantic import BaseModel
 from ..core.database import get_db
 from ..core.security import security_manager, get_current_user, get_current_superuser
+from ..core.google_auth import get_current_user_from_google_token
 from ..models.user import (
     User, UserCreate, UserResponse, UserLogin, Token, 
     UserUpdate, PasswordChange
@@ -18,6 +20,10 @@ from ..utils.logger import setup_logger
 
 router = APIRouter()
 logger = setup_logger(__name__)
+
+class GoogleTokenRequest(BaseModel):
+    """Model for Google OAuth token request."""
+    access_token: str
 
 @router.post("/register", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
 async def register_user(user_data: UserCreate, db: Session = Depends(get_db)):
@@ -378,4 +384,62 @@ async def generate_api_key(current_user: User = Depends(get_current_superuser)):
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Internal server error while generating API key"
+        )
+
+@router.post("/google-login", response_model=Token)
+async def google_login(
+    request: Request,
+    db: Session = Depends(get_db)
+):
+    """
+    Authenticate user with Google OAuth token and return JWT tokens.
+    
+    Args:
+        request: FastAPI request object containing Google access token in Authorization header
+        db: Database session
+        
+    Returns:
+        JWT access and refresh tokens
+        
+    Raises:
+        HTTPException: If Google token is invalid or authentication fails
+    """
+    try:
+        # Get user from Google token (this also creates/updates user in DB)
+        user = await get_current_user_from_google_token(request, db)
+        
+        if not user.is_active:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Inactive user account",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        
+        # Create JWT tokens
+        access_token_expires = timedelta(minutes=security_manager.access_token_expire_minutes)
+        access_token = security_manager.create_access_token(
+            data={"sub": user.email, "user_id": user.id, "is_superuser": user.is_superuser},
+            expires_delta=access_token_expires
+        )
+        
+        refresh_token = security_manager.create_refresh_token(
+            data={"sub": user.email, "user_id": user.id}
+        )
+        
+        logger.info(f"Google OAuth user logged in successfully: {user.email}")
+        
+        return Token(
+            access_token=access_token,
+            token_type="bearer",
+            expires_in=security_manager.access_token_expire_minutes * 60,
+            refresh_token=refresh_token
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error during Google OAuth login: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Internal server error during Google OAuth login"
         ) 

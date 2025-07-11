@@ -12,17 +12,18 @@ logger = setup_logger(__name__)
 class ChatMemoryService:
     """Service for managing chat sessions and message history."""
     
-    def create_session(self, db: Session, title: str = "New Chat") -> ChatSession:
-        """Create a new chat session."""
+    def create_session(self, db: Session, title: str = "New Chat", user_id: Optional[str] = None) -> ChatSession:
+        """Create a new chat session with optional user ownership."""
         try:
             session = ChatSession(
                 id=str(uuid.uuid4()),
-                title=title
+                title=title,
+                user_id=user_id
             )
             db.add(session)
             db.commit()
             db.refresh(session)
-            logger.info(f"Created new chat session: {session.id}")
+            logger.info(f"Created new chat session: {session.id} for user {user_id}")
             return session
         except Exception as e:
             db.rollback()
@@ -37,10 +38,27 @@ class ChatMemoryService:
             logger.error(f"Error getting chat session {session_id}: {str(e)}")
             raise
     
-    def get_all_sessions(self, db: Session) -> List[ChatSessionResponse]:
-        """Get all chat sessions with message counts."""
+    def get_all_sessions(self, db: Session, user_id: Optional[str] = None) -> List[ChatSessionResponse]:
+        """
+        Get all chat sessions with message counts, optionally filtered by user.
+        
+        Args:
+            db: Database session
+            user_id: Optional user ID to filter sessions
+            
+        Returns:
+            List of chat sessions with metadata
+        """
         try:
-            sessions = db.query(ChatSession).order_by(desc(ChatSession.updated_at)).all()
+            query = db.query(ChatSession).order_by(desc(ChatSession.updated_at))
+            
+            # Filter by user if provided
+            if user_id:
+                # Note: This assumes sessions are linked to users via a user_id field
+                # You may need to add this field to the ChatSession model
+                query = query.filter(ChatSession.user_id == user_id)
+            
+            sessions = query.all()
             session_responses = []
             
             for session in sessions:

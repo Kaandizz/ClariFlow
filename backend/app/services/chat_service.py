@@ -13,19 +13,20 @@ class ChatService:
     def __init__(self):
         self.client = OpenAI(api_key=settings.OPENAI_API_KEY)
         self.chroma_client = chromadb.PersistentClient(
-            path="./chroma_db",
+            path=settings.CHROMA_PERSIST_DIRECTORY,
             settings=Settings(anonymized_telemetry=False)
         )
         self.similarity_threshold = 0.3  # Minimum relevance score to use document context
         self.max_history_length = 5  # Keep last 5 turns to save tokens
         
-    async def chat(self, query: str, history: Optional[List[str]] = None) -> Dict[str, Any]:
+    async def chat(self, query: str, history: Optional[List[str]] = None, user_id: Optional[str] = None) -> Dict[str, Any]:
         """
         Handle universal chatbot queries - combining document-based and general chat.
         
         Args:
             query: User's query/message
             history: List of previous messages (optional)
+            user_id: Optional user ID for document filtering
             
         Returns:
             Dictionary with response, source, and optional metadata
@@ -40,8 +41,8 @@ class ChatService:
             # Truncate history to save tokens
             history = history[-self.max_history_length:]
             
-            # Check if any documents exist
-            available_documents = self.get_available_documents()
+            # Check if any documents exist for this user
+            available_documents = self.get_available_documents(user_id)
             
             if not available_documents:
                 # No documents available, use general OpenAI chat
@@ -135,38 +136,49 @@ class ChatService:
             raise
     
     async def _try_document_search(self, query: str, available_documents: List[str], history: List[str]) -> Optional[Dict[str, Any]]:
-        """Search through available documents for relevant information."""
+        """Search through available documents for relevant information with improved error handling."""
         try:
             best_response = None
             best_score = 0
+            search_errors = []
             
             for document_id in available_documents:
                 try:
                     # Get collection for the document
                     collection = self.chroma_client.get_collection(name=document_id)
                     
-                    # Search for relevant chunks
+                    # Validate collection has content
+                    if collection.count() == 0:
+                        logger.warning(f"Collection {document_id} is empty, skipping")
+                        continue
+                    
+                    # Search for relevant chunks with more results for better context
                     results = collection.query(
                         query_texts=[query],
-                        n_results=3,
+                        n_results=5,  # Increased from 3 for better context
                         include=["documents", "metadatas", "distances"]
                     )
                     
                     if not results['documents'] or not results['documents'][0]:
                         continue
                     
-                    # Calculate relevance score based on distance
+                    # Calculate relevance score based on distance with improved scoring
                     distances = results['distances'][0] if results['distances'] else []
                     if distances:
-                        # Convert distance to relevance score (lower distance = higher relevance)
+                        # Improved relevance scoring: consider both average and best distance
                         avg_distance = sum(distances) / len(distances)
-                        relevance_score = max(0, 1 - avg_distance)  # Normalize to 0-1
+                        min_distance = min(distances)
                         
-                        if relevance_score > best_score:
-                            # Prepare context from relevant chunks
-                            context = "\n\n".join(results['documents'][0])
+                        # Weighted score: 70% best match, 30% average
+                        relevance_score = max(0, 1 - (0.7 * min_distance + 0.3 * avg_distance))
+                        
+                        # Only consider if score is above threshold
+                        if relevance_score > self.similarity_threshold and relevance_score > best_score:
+                            # Prepare context from relevant chunks with better formatting
+                            context_chunks = results['documents'][0]
+                            context = "\n\n---\n\n".join(context_chunks)
                             
-                            # Build conversation messages with document context
+                            # Build conversation messages with improved document context
                             messages = [
                                 {
                                     "role": "system", 
@@ -175,7 +187,9 @@ class ChatService:
                                     Context from the document:
                                     {context}
                                     
-                                    Please answer the user's query based on the provided context. If the context doesn't contain enough information to answer the query completely, you can supplement with your general knowledge, but prioritize the document information. Be accurate and helpful."""
+                                    Please answer the user's query based on the provided context. If the context doesn't contain enough information to answer the query completely, you can supplement with your general knowledge, but prioritize the document information. Be accurate and helpful.
+                                    
+                                    If the context is not relevant to the query, say so clearly."""
                                 }
                             ]
                             
@@ -187,11 +201,11 @@ class ChatService:
                             # Add current query
                             messages.append({"role": "user", "content": query})
                             
-                            # Get response from OpenAI
+                            # Get response from OpenAI with better parameters
                             response = self.client.chat.completions.create(
                                 model="gpt-4",
                                 messages=messages,
-                                max_tokens=1000,
+                                max_tokens=1200,  # Increased for better responses
                                 temperature=0.3
                             )
                             
@@ -207,8 +221,16 @@ class ChatService:
                             best_score = relevance_score
                             
                 except Exception as e:
-                    logger.warning(f"Error searching document {document_id}: {str(e)}")
+                    error_msg = f"Error searching document {document_id}: {str(e)}"
+                    search_errors.append(error_msg)
+                    logger.warning(error_msg)
                     continue
+            
+            # Log search summary
+            if search_errors:
+                logger.warning(f"Search completed with {len(search_errors)} errors: {search_errors[:3]}...")
+            else:
+                logger.info("Document search completed successfully")
             
             return best_response
             
@@ -216,11 +238,47 @@ class ChatService:
             logger.error(f"Error in document search: {str(e)}")
             return None
     
-    def get_available_documents(self) -> List[str]:
-        """Get list of available document IDs."""
+    def get_available_documents(self, user_id: Optional[str] = None) -> List[str]:
+        """
+        Get list of available document IDs with validation.
+        
+        Args:
+            user_id: Optional user ID to filter documents by user
+            
+        Returns:
+            List of valid document IDs
+        """
         try:
             collections = self.chroma_client.list_collections()
-            return [col.name for col in collections]
+            valid_documents = []
+            
+            for collection in collections:
+                try:
+                    # Validate collection has content
+                    collection_obj = self.chroma_client.get_collection(name=collection.name)
+                    count = collection_obj.count()
+                    
+                    if count > 0:
+                        # Check if this document belongs to the user (if user_id provided)
+                        if user_id:
+                            # Get sample metadata to check user ownership
+                            sample = collection_obj.get(limit=1)
+                            if sample['metadatas'] and sample['metadatas'][0]:
+                                metadata = sample['metadatas'][0]
+                                doc_user_id = metadata.get('user_id')
+                                if doc_user_id == user_id:
+                                    valid_documents.append(collection.name)
+                        else:
+                            # No user filtering, include all valid documents
+                            valid_documents.append(collection.name)
+                            
+                except Exception as e:
+                    logger.warning(f"Invalid collection {collection.name}: {str(e)}")
+                    continue
+            
+            logger.info(f"Found {len(valid_documents)} valid documents")
+            return valid_documents
+            
         except Exception as e:
             logger.error(f"Error getting available documents: {str(e)}")
             return [] 

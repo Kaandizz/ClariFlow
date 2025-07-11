@@ -5,9 +5,11 @@ from ..models.lead import (
     LeadCreate, LeadUpdate, LeadResponse, LeadListResponse, 
     LeadReminderRequest, CRMSyncRequest, CRMSyncResponse, LeadStatus
 )
+from ..models.user import User
 from ..services.lead_service import LeadService
 from ..services.reminder_scheduler import reminder_scheduler
 from ..core.database import get_db
+from ..core.security import get_current_active_user
 from ..utils.logger import setup_logger
 
 router = APIRouter()
@@ -15,7 +17,11 @@ lead_service = LeadService()
 logger = setup_logger(__name__)
 
 @router.post("/leads", response_model=LeadResponse)
-async def create_lead(lead_data: LeadCreate, db: Session = Depends(get_db)):
+async def create_lead(
+    lead_data: LeadCreate, 
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user)
+):
     """
     Create a new lead.
     
@@ -61,7 +67,8 @@ async def get_leads(
     limit: int = Query(100, ge=1, le=1000, description="Number of records to return"),
     status: Optional[LeadStatus] = Query(None, description="Filter by lead status"),
     search: Optional[str] = Query(None, description="Search in name, email, phone, source, notes"),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user)
 ):
     """
     Get all leads with pagination and filtering.

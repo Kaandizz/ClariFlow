@@ -27,6 +27,7 @@ class InsightQuery(BaseModel):
     data_source_type: DataSourceType = Field(..., description="Type of data source")
     filters: Optional[Dict[str, Any]] = Field(default=None, description="Optional filters to apply to the data")
     visualization_type: Optional[str] = Field(default=None, description="Type of visualization to generate (chart, table, etc.)")
+    analysis_type: Optional[str] = Field(default=None, description="Type of advanced analysis to perform (regression, clustering, forecasting)")
 
 class InsightResponse(BaseModel):
     """Response model for insight generation"""

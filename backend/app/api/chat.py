@@ -51,13 +51,13 @@ async def chat(
             history = chat_memory_service.get_session_history(db, request.session_id)
         
         # Process universal chat request
-        result = await chat_service.chat(query=request.query, history=history)
+        result = await chat_service.chat(query=request.query, history=history, user_id=str(current_user.id))
         
         # Save messages to database
         session_id = request.session_id
         if not session_id:
             # Create new session if none provided
-            session = chat_memory_service.create_session(db)
+            session = chat_memory_service.create_session(db, user_id=str(current_user.id))
             session_id = session.id
         
         # Save user message
@@ -120,7 +120,7 @@ async def get_sessions(
         List of chat sessions with metadata
     """
     try:
-        sessions = chat_memory_service.get_all_sessions(db)
+        sessions = chat_memory_service.get_all_sessions(db, user_id=str(current_user.id))
         logger.info(f"Retrieved {len(sessions)} chat sessions for user {current_user.email}")
         return sessions
     except Exception as e:
@@ -186,7 +186,7 @@ async def create_session(
         Created chat session
     """
     try:
-        session = chat_memory_service.create_session(db, request.title)
+        session = chat_memory_service.create_session(db, request.title, user_id=str(current_user.id))
         session_response = ChatSessionResponse(
             id=session.id,
             title=session.title,
@@ -289,6 +289,69 @@ async def delete_session(
             detail="Internal server error while deleting session"
         )
 
+@router.post("/chat/query", response_model=ChatResponse)
+async def chat_query(
+    request: ChatRequest, 
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user)
+):
+    """
+    Handle document-based Q&A queries (semantic search).
+    
+    This endpoint specifically focuses on answering questions based on uploaded documents.
+    It uses semantic search through ChromaDB and OpenAI embeddings.
+    
+    Args:
+        request: ChatRequest with query for document-based Q&A
+        db: Database session
+        current_user: Current authenticated user
+        
+    Returns:
+        ChatResponse with document-based answer and source information
+    """
+    try:
+        logger.info(f"Document Q&A query from user {current_user.email}: '{request.query[:50]}...'")
+        
+        # Validate request
+        if not request.query.strip():
+            raise HTTPException(
+                status_code=400,
+                detail="Query cannot be empty"
+            )
+        
+        # Process the query using chat service (which includes semantic search)
+        result = await chat_service.chat(
+            query=request.query, 
+            history=request.history or [], 
+            user_id=str(current_user.id)
+        )
+        
+        # Create response
+        response = ChatResponse(
+            response=result["response"],
+            source=result["source"],
+            sources=result["sources"],
+            document_id=result["document_id"],
+            timestamp=result["timestamp"],
+            session_id=None,  # Query endpoint doesn't use sessions
+            used_context=result["used_context"],
+            matched_chunks=result["matched_chunks"],
+            relevance_score=result["relevance_score"]
+        )
+        
+        logger.info(f"Document Q&A response generated for user {current_user.email}: used_context={result['used_context']}")
+        
+        return response
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in document Q&A endpoint for user {current_user.email}: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail="Internal server error while processing document query"
+        )
+
 @router.get("/documents")
 async def get_available_documents(current_user: User = Depends(get_current_active_user)):
     """
@@ -298,15 +361,36 @@ async def get_available_documents(current_user: User = Depends(get_current_activ
         current_user: Current authenticated user
     
     Returns:
-        List of available documents
+        List of available documents with metadata
     """
     try:
-        # This would typically return documents available to the current user
-        # For now, returning a placeholder response
-        logger.info(f"Document list requested by user {current_user.email}")
+        # Get available documents for this user
+        document_ids = chat_service.get_available_documents(user_id=str(current_user.id))
+        
+        documents = []
+        for doc_id in document_ids:
+            try:
+                # Get document metadata from ChromaDB
+                collection = chat_service.chroma_client.get_collection(name=doc_id)
+                sample = collection.get(limit=1)
+                
+                if sample['metadatas'] and sample['metadatas'][0]:
+                    metadata = sample['metadatas'][0]
+                    documents.append({
+                        "document_id": doc_id,
+                        "filename": metadata.get("filename", "Unknown"),
+                        "chunk_count": collection.count(),
+                        "source": metadata.get("source", "Unknown")
+                    })
+            except Exception as e:
+                logger.warning(f"Error getting metadata for document {doc_id}: {str(e)}")
+                continue
+        
+        logger.info(f"Document list requested by user {current_user.email}: {len(documents)} documents found")
         return {
-            "documents": [],
-            "message": "No documents available"
+            "documents": documents,
+            "total_count": len(documents),
+            "message": f"Found {len(documents)} documents" if documents else "No documents available"
         }
     except Exception as e:
         logger.error(f"Error getting documents for user {current_user.email}: {str(e)}")

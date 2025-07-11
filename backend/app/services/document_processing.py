@@ -5,7 +5,10 @@ from typing import List, Optional, Tuple, Dict
 from langchain_community.document_loaders import (
     PyPDFLoader,
     Docx2txtLoader,
-    TextLoader
+    TextLoader,
+    CSVLoader,
+    UnstructuredExcelLoader,
+    UnstructuredMarkdownLoader
 )
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.schema import Document
@@ -48,7 +51,7 @@ class DocumentProcessor:
             return False, f"File size ({file_size / (1024*1024):.2f}MB) exceeds maximum allowed size ({max_size / (1024*1024)}MB)"
         
         # Check file extension
-        allowed_extensions = {'.pdf', '.docx', '.txt'}
+        allowed_extensions = {'.pdf', '.docx', '.txt', '.csv', '.xlsx', '.xls', '.md'}
         file_ext = os.path.splitext(file_path)[1].lower()
         
         if file_ext not in allowed_extensions:
@@ -94,6 +97,12 @@ class DocumentProcessor:
                 loader = Docx2txtLoader(file_path)
             elif file_ext == '.txt':
                 loader = TextLoader(file_path)
+            elif file_ext == '.csv':
+                loader = CSVLoader(file_path)
+            elif file_ext in ['.xlsx', '.xls']:
+                loader = UnstructuredExcelLoader(file_path)
+            elif file_ext == '.md':
+                loader = UnstructuredMarkdownLoader(file_path)
             else:
                 raise ValueError(f"Unsupported file type: {file_ext}")
             
@@ -101,12 +110,13 @@ class DocumentProcessor:
         except Exception as e:
             raise Exception(f"Error loading document: {str(e)}")
 
-    def process_file(self, file_path: str) -> Tuple[str, int]:
+    def process_file(self, file_path: str, user_id: Optional[str] = None) -> Tuple[str, int]:
         """
         Process a single file: load, split, and store embeddings.
         
         Args:
             file_path: Path to the file to process
+            user_id: Optional user ID for document ownership
             
         Returns:
             Tuple of (document_id, number of chunks processed)
@@ -121,12 +131,13 @@ class DocumentProcessor:
             # Split into chunks
             chunks = self.text_splitter.split_documents(documents)
             
-            # Create metadata for each chunk
+            # Create metadata for each chunk with user ownership
             metadatas = [{
                 "source": file_path,
                 "document_id": document_id,
                 "chunk_index": i,
-                "filename": os.path.basename(file_path)
+                "filename": os.path.basename(file_path),
+                "user_id": user_id  # Add user ownership
             } for i in range(len(chunks))]
             
             # Store embeddings in document-specific collection
@@ -136,20 +147,21 @@ class DocumentProcessor:
                 collection_name=document_id
             )
             
-            logger.info(f"Processed file {file_path}: {len(chunks)} chunks generated")
+            logger.info(f"Processed file {file_path}: {len(chunks)} chunks generated for user {user_id}")
             return document_id, len(chunks)
             
         except Exception as e:
             logger.error(f"Error processing file {file_path}: {str(e)}")
             raise Exception(f"Error processing file: {str(e)}")
 
-    def process_files_batch(self, file_paths: List[str], file_sizes: List[int]) -> List[Dict]:
+    def process_files_batch(self, file_paths: List[str], file_sizes: List[int], user_id: Optional[str] = None) -> List[Dict]:
         """
         Process multiple files in batch.
         
         Args:
             file_paths: List of file paths to process
             file_sizes: List of corresponding file sizes
+            user_id: Optional user ID for document ownership
             
         Returns:
             List of processing results for each file
@@ -171,8 +183,8 @@ class DocumentProcessor:
                     })
                     continue
                 
-                # Process file
-                document_id, chunk_count = self.process_file(file_path)
+                # Process file with user ownership
+                document_id, chunk_count = self.process_file(file_path, user_id)
                 
                 results.append({
                     "filename": os.path.basename(file_path),

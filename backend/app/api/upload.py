@@ -1,8 +1,11 @@
 import os
 import aiofiles
-from typing import List
-from fastapi import APIRouter, UploadFile, HTTPException, File, Depends, status
+from typing import List, Optional
+from fastapi import APIRouter, UploadFile, HTTPException, File, Depends, status, Request
+from sqlalchemy.orm import Session
 from ..services.document_processing import DocumentProcessor
+from ..services.audit_service import AuditService
+from ..core.database import get_db
 from ..models.upload import UploadResponse, FileUploadResult, UploadStatus
 from ..core.config import settings
 from ..core.security import get_current_active_user, verify_api_key_header, optional_api_key_auth
@@ -12,6 +15,7 @@ from ..utils.logger import setup_logger
 
 router = APIRouter()
 processor = DocumentProcessor()
+audit_service = AuditService()
 logger = setup_logger(__name__)
 
 def validate_file_size(file_size: int) -> bool:
@@ -26,14 +30,16 @@ def validate_file_extension(filename: str) -> bool:
 @router.post("/upload", response_model=UploadResponse)
 async def upload_files(
     files: List[UploadFile] = File(...),
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db)
 ):
     """
     Upload and process multiple document files.
     
     Args:
-        files: List of files to upload (PDF, DOCX, or TXT)
+        files: List of files to upload (PDF, DOCX, TXT, CSV, XLSX, XLS, or MD)
         current_user: Current authenticated user
+        db: Database session
         
     Returns:
         UploadResponse with processing status for each file
@@ -55,7 +61,7 @@ async def upload_files(
         )
     
     # Create uploads directory if it doesn't exist
-    os.makedirs('uploads', exist_ok=True)
+    os.makedirs(settings.UPLOAD_DIR, exist_ok=True)
     
     file_paths = []
     file_sizes = []
@@ -65,7 +71,7 @@ async def upload_files(
         # Validate and save all files
         for file in files:
             # Validate file extension
-            if not validate_file_extension(file.filename):
+            if not file.filename or not validate_file_extension(file.filename):
                 raise HTTPException(
                     status_code=400,
                     detail=f"File type not allowed: {file.filename}. Allowed types: {', '.join(settings.ALLOWED_EXTENSIONS)}"
@@ -83,7 +89,7 @@ async def upload_files(
                 )
             
             # Save file
-            file_path = os.path.join('uploads', f"{current_user.id}_{file.filename}")
+            file_path = os.path.join(settings.UPLOAD_DIR, f"{current_user.id}_{file.filename}")
             file_paths.append(file_path)
             file_sizes.append(file_size)
             
@@ -94,7 +100,7 @@ async def upload_files(
             logger.info(f"Saved file for user {current_user.email}: {file.filename} ({file_size} bytes)")
         
         # Process files in batch
-        processing_results = processor.process_files_batch(file_paths, file_sizes)
+        processing_results = processor.process_files_batch(file_paths, file_sizes, str(current_user.id))
         
         # Convert results to FileUploadResult objects
         file_results = []
@@ -113,8 +119,33 @@ async def upload_files(
             
             if result["status"] == "success":
                 successful_count += 1
+                # Log successful file upload
+                audit_service.log_data_modification_event(
+                    db=db,
+                    user_id=str(current_user.id),
+                    resource_type="document",
+                    resource_id=result["document_id"],
+                    action="file_upload_success",
+                    new_data={
+                        "filename": result["filename"],
+                        "file_size": result.get("file_size"),
+                        "chunk_count": result["chunk_count"]
+                    }
+                )
             else:
                 failed_count += 1
+                # Log failed file upload
+                audit_service.log_data_modification_event(
+                    db=db,
+                    user_id=str(current_user.id),
+                    resource_type="document",
+                    resource_id=result.get("document_id", "unknown"),
+                    action="file_upload_failed",
+                    new_data={
+                        "filename": result["filename"],
+                        "error": result["error_message"]
+                    }
+                )
         
         # Determine overall message
         if successful_count == len(files):
@@ -162,7 +193,7 @@ async def upload_single_file(
     Upload and process a single document file (backward compatibility).
     
     Args:
-        file: The file to upload (PDF, DOCX, or TXT)
+        file: The file to upload (PDF, DOCX, TXT, CSV, XLSX, XLS, or MD)
         current_user: Current authenticated user
         
     Returns:
@@ -172,20 +203,20 @@ async def upload_single_file(
         HTTPException: If file type is not supported, file too large, or processing fails
     """
     # Create uploads directory if it doesn't exist
-    os.makedirs('uploads', exist_ok=True)
+    os.makedirs(settings.UPLOAD_DIR, exist_ok=True)
     
     file_path = None
     
     try:
         # Validate file extension
-        if not validate_file_extension(file.filename):
+        if not file.filename or not validate_file_extension(file.filename):
             raise HTTPException(
                 status_code=400,
                 detail=f"File type not allowed: {file.filename}. Allowed types: {', '.join(settings.ALLOWED_EXTENSIONS)}"
             )
         
         # Save file
-        file_path = os.path.join('uploads', f"{current_user.id}_{file.filename}")
+        file_path = os.path.join(settings.UPLOAD_DIR, f"{current_user.id}_{file.filename}")
         content = await file.read()
         
         # Validate file size
@@ -201,7 +232,7 @@ async def upload_single_file(
         logger.info(f"Saved single file for user {current_user.email}: {file.filename} ({len(content)} bytes)")
         
         # Process file using batch method for consistency
-        processing_results = processor.process_files_batch([file_path], [len(content)])
+        processing_results = processor.process_files_batch([file_path], [len(content)], str(current_user.id))
         result = processing_results[0]
         
         file_result = FileUploadResult(
@@ -247,7 +278,7 @@ async def upload_single_file(
                 os.remove(file_path)
                 logger.debug(f"Cleaned up temporary file: {file_path}")
             except Exception as e:
-                logger.warning(f"Failed to clean up file {file_path}: {str(e)}") 
+                logger.warning(f"Failed to clean up file {file_path}: {str(e)}")
 
 @router.post("/upload/api-key", response_model=UploadResponse)
 async def upload_files_with_api_key(
@@ -278,7 +309,7 @@ async def upload_files_with_api_key(
         )
     
     # Create uploads directory if it doesn't exist
-    os.makedirs('uploads', exist_ok=True)
+    os.makedirs(settings.UPLOAD_DIR, exist_ok=True)
     
     file_paths = []
     file_sizes = []
@@ -288,7 +319,7 @@ async def upload_files_with_api_key(
         # Validate and save all files
         for file in files:
             # Validate file extension
-            if not validate_file_extension(file.filename):
+            if not file.filename or not validate_file_extension(file.filename):
                 raise HTTPException(
                     status_code=400,
                     detail=f"File type not allowed: {file.filename}. Allowed types: {', '.join(settings.ALLOWED_EXTENSIONS)}"
@@ -306,7 +337,7 @@ async def upload_files_with_api_key(
                 )
             
             # Save file
-            file_path = os.path.join('uploads', f"api_key_{file.filename}")
+            file_path = os.path.join(settings.UPLOAD_DIR, f"api_key_{file.filename}")
             file_paths.append(file_path)
             file_sizes.append(file_size)
             
@@ -316,8 +347,8 @@ async def upload_files_with_api_key(
             
             logger.info(f"Saved file via API key: {file.filename} ({file_size} bytes)")
         
-        # Process files in batch
-        processing_results = processor.process_files_batch(file_paths, file_sizes)
+        # Process files in batch (use system user ID for API key uploads)
+        processing_results = processor.process_files_batch(file_paths, file_sizes, "system")
         
         # Convert results to FileUploadResult objects
         file_results = []

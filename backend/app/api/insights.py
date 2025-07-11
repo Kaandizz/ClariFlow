@@ -5,6 +5,7 @@ from ..models.insights import (
     InsightQuery, InsightResponse, DataSourceList, DataSourceType
 )
 from ..utils.logger import setup_logger
+from datetime import datetime
 
 logger = setup_logger(__name__)
 router = APIRouter()
@@ -199,13 +200,33 @@ async def get_analysis_types():
             },
             "summary": {
                 "name": "Data Summary",
-                "description": "Provide overview and key statistics",
+                "description": "Generate comprehensive data overview",
                 "examples": [
-                    "Key performance indicators summary",
-                    "Overall business metrics overview",
-                    "Data insights summary"
+                    "Overall business performance summary",
+                    "Key metrics overview",
+                    "Data quality assessment"
                 ],
-                "keywords": ["summary", "overview", "key", "main", "important"]
+                "keywords": ["summary", "overview", "summary", "total", "average"]
+            },
+            "regression": {
+                "name": "Regression Analysis",
+                "description": "Statistical modeling and prediction",
+                "examples": [
+                    "Predict sales based on marketing spend",
+                    "Model customer lifetime value",
+                    "Forecast demand using historical data"
+                ],
+                "keywords": ["regression", "model", "predict", "relationship", "coefficient"]
+            },
+            "clustering": {
+                "name": "Clustering Analysis",
+                "description": "Group similar data points together",
+                "examples": [
+                    "Customer segmentation",
+                    "Product categorization",
+                    "Market segment identification"
+                ],
+                "keywords": ["cluster", "segment", "group", "category", "classification"]
             }
         }
         
@@ -216,6 +237,85 @@ async def get_analysis_types():
         raise HTTPException(
             status_code=500,
             detail=f"Failed to get analysis types: {str(e)}"
+        )
+
+@router.post("/insights/detect-kpis")
+async def detect_kpis(data_source: str, data_source_type: DataSourceType):
+    """
+    Automatically detect KPIs and key metrics from a data source.
+    
+    Returns automatically identified KPIs, metrics, and data insights.
+    """
+    try:
+        logger.info(f"Detecting KPIs for data source: {data_source}")
+        
+        # Load data
+        df = await insight_service._load_data_source(data_source, data_source_type)
+        if df is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Data source '{data_source}' not found or could not be loaded."
+            )
+        
+        # Detect KPIs
+        kpis = insight_service.auto_detect_kpis(df)
+        
+        logger.info(f"KPI detection completed for {data_source}")
+        return {
+            "data_source": data_source,
+            "kpis": kpis,
+            "detected_at": datetime.now()
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error detecting KPIs: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to detect KPIs: {str(e)}"
+        )
+
+@router.post("/insights/advanced-analysis")
+async def perform_advanced_analysis(
+    data_source: str, 
+    data_source_type: DataSourceType,
+    analysis_type: str
+):
+    """
+    Perform advanced statistical analysis on data.
+    
+    Supported analysis types: regression, clustering, forecasting
+    """
+    try:
+        logger.info(f"Performing {analysis_type} analysis on {data_source}")
+        
+        # Load data
+        df = await insight_service._load_data_source(data_source, data_source_type)
+        if df is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Data source '{data_source}' not found or could not be loaded."
+            )
+        
+        # Perform analysis
+        results = insight_service.perform_advanced_analysis(df, analysis_type)
+        
+        logger.info(f"Advanced analysis completed for {data_source}")
+        return {
+            "data_source": data_source,
+            "analysis_type": analysis_type,
+            "results": results,
+            "completed_at": datetime.now()
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error performing advanced analysis: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to perform advanced analysis: {str(e)}"
         )
 
 @router.get("/insights/health")

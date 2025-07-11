@@ -13,7 +13,7 @@ class EmbeddingService:
             model="text-embedding-3-small"
         )
         self.chroma_client = chromadb.PersistentClient(
-            path="./chroma_db",
+            path=settings.CHROMA_PERSIST_DIRECTORY,
             settings=Settings(anonymized_telemetry=False)
         )
 

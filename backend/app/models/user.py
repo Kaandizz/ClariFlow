@@ -1,4 +1,5 @@
 from sqlalchemy import Column, String, DateTime, Boolean, Integer
+from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from pydantic import BaseModel, EmailStr
 from typing import Optional
@@ -17,6 +18,10 @@ class User(Base):
     is_superuser = Column(Boolean, default=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+    
+    # Relationships
+    workflows = relationship("Workflow", back_populates="user")
+    audit_logs = relationship("AuditLog", back_populates="user")
 
 # Pydantic models for API requests/responses
 class UserCreate(BaseModel):

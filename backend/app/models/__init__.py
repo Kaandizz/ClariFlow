@@ -2,6 +2,11 @@
 from .user import User
 from .chat import ChatSession, ChatMessage
 from .lead import Lead, LeadStatus
+from .workflow import (
+    Workflow, WorkflowStep, WorkflowExecution, WorkflowStepExecution,
+    WorkflowTriggerType, WorkflowStatus, WorkflowExecutionStatus, WorkflowActionType,
+    AuditLog, AuditLogLevel, AuditLogCategory
+)
 
 # Export all models for easy importing
 __all__ = [
@@ -9,5 +14,16 @@ __all__ = [
     "ChatSession", 
     "ChatMessage",
     "Lead",
-    "LeadStatus"
+    "LeadStatus",
+    "Workflow",
+    "WorkflowStep", 
+    "WorkflowExecution",
+    "WorkflowStepExecution",
+    "WorkflowTriggerType",
+    "WorkflowStatus",
+    "WorkflowExecutionStatus", 
+    "WorkflowActionType",
+    "AuditLog",
+    "AuditLogLevel",
+    "AuditLogCategory"
 ] 

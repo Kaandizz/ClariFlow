@@ -5,6 +5,9 @@ from typing import Optional, List, Dict, Any, Tuple
 from datetime import datetime
 import json
 from openai import OpenAI
+from sklearn.linear_model import LinearRegression
+from sklearn.cluster import KMeans
+from sklearn.preprocessing import StandardScaler
 from ..core.config import settings
 from ..utils.logger import setup_logger
 from ..models.insights import (
@@ -17,7 +20,7 @@ logger = setup_logger(__name__)
 class InsightService:
     def __init__(self):
         self.client = OpenAI(api_key=settings.OPENAI_API_KEY)
-        self.upload_dir = settings.upload_dir
+        self.upload_dir = settings.UPLOAD_DIR
         self.supported_extensions = ['.csv', '.xlsx', '.xls']
         
     async def generate_insight(self, query: InsightQuery) -> InsightResponse:
@@ -38,12 +41,20 @@ class InsightService:
             if df is None:
                 raise ValueError(f"Could not load data source: {query.data_source}")
             
+            # Auto-detect KPIs and key metrics
+            kpis = self.auto_detect_kpis(df)
+            
             # Apply filters if provided
             if query.filters:
                 df = self._apply_filters(df, query.filters)
             
+            # Perform advanced analysis if requested
+            advanced_analysis = {}
+            if hasattr(query, 'analysis_type') and query.analysis_type:
+                advanced_analysis = self.perform_advanced_analysis(df, query.analysis_type)
+            
             # Analyze data and generate insight
-            analysis_result = await self._analyze_data(df, query.question)
+            analysis_result = await self._analyze_data(df, query.question, kpis, advanced_analysis)
             
             # Determine insight type
             insight_type = self._determine_insight_type(query.question, analysis_result)
@@ -51,7 +62,7 @@ class InsightService:
             # Generate visualization data if requested
             visualization_data = None
             if query.visualization_type:
-                visualization_data = self._generate_visualization_data(df, query.visualization_type, analysis_result)
+                visualization_data = self._generate_visualization_data(df, query.visualization_type, analysis_result, advanced_analysis)
             
             # Create response
             response = InsightResponse(
@@ -61,7 +72,11 @@ class InsightService:
                 data_source=query.data_source,
                 confidence_score=analysis_result['confidence'],
                 visualization_data=visualization_data,
-                supporting_data=analysis_result['supporting_data'],
+                supporting_data={
+                    **analysis_result['supporting_data'],
+                    'kpis': kpis,
+                    'advanced_analysis': advanced_analysis
+                },
                 recommendations=analysis_result['recommendations']
             )
             
@@ -189,7 +204,7 @@ class InsightService:
         
         return filtered_df
     
-    async def _analyze_data(self, df: pd.DataFrame, question: str) -> Dict[str, Any]:
+    async def _analyze_data(self, df: pd.DataFrame, question: str, kpis: Dict[str, Any], advanced_analysis: Dict[str, Any]) -> Dict[str, Any]:
         """Analyze data using OpenAI and pandas."""
         try:
             # Prepare data summary for OpenAI
@@ -203,6 +218,12 @@ class InsightService:
             {data_summary}
             
             User Question: {question}
+            
+            KPIs and Key Metrics:
+            {json.dumps(kpis)}
+            
+            Advanced Analysis:
+            {json.dumps(advanced_analysis)}
             
             Please provide:
             1. A clear, actionable answer to the question
@@ -294,13 +315,20 @@ class InsightService:
         else:
             return InsightType.SUMMARY
     
-    def _generate_visualization_data(self, df: pd.DataFrame, viz_type: str, analysis_result: Dict[str, Any]) -> Dict[str, Any]:
-        """Generate data for visualizations."""
+    def _generate_visualization_data(self, df: pd.DataFrame, viz_type: str, analysis_result: Dict[str, Any], advanced_analysis: Dict[str, Any]) -> Dict[str, Any]:
+        """Generate data for visualizations with advanced chart types."""
         try:
             viz_data = {
                 "type": viz_type,
                 "data": {},
-                "options": {}
+                "options": {
+                    "responsive": True,
+                    "maintainAspectRatio": False,
+                    "plugins": {
+                        "legend": {"display": True},
+                        "tooltip": {"enabled": True}
+                    }
+                }
             }
             
             if viz_type == "line_chart":
@@ -309,7 +337,7 @@ class InsightService:
                 if len(numeric_cols) > 0:
                     viz_data["data"] = {
                         "labels": df.index.tolist(),
-                        "datasets": [{"label": col, "data": df[col].tolist()} for col in numeric_cols[:3]]
+                        "datasets": [{"label": col, "data": df[col].tolist(), "borderColor": f"rgb({np.random.randint(0,255)},{np.random.randint(0,255)},{np.random.randint(0,255)})", "fill": False} for col in numeric_cols[:5]]
                     }
                     
             elif viz_type == "bar_chart":
@@ -320,14 +348,84 @@ class InsightService:
                     value_counts = df[col].value_counts().head(10)
                     viz_data["data"] = {
                         "labels": value_counts.index.tolist(),
-                        "datasets": [{"label": col, "data": value_counts.values.tolist()}]
+                        "datasets": [{"label": col, "data": value_counts.values.tolist(), "backgroundColor": f"rgba({np.random.randint(0,255)},{np.random.randint(0,255)},{np.random.randint(0,255)},0.8)"}]
+                    }
+                    
+            elif viz_type == "pie_chart":
+                # Generate pie chart data
+                categorical_cols = df.select_dtypes(include=['object']).columns
+                if len(categorical_cols) > 0:
+                    col = categorical_cols[0]
+                    value_counts = df[col].value_counts().head(8)
+                    colors = [f"rgb({np.random.randint(0,255)},{np.random.randint(0,255)},{np.random.randint(0,255)})" for _ in range(len(value_counts))]
+                    viz_data["data"] = {
+                        "labels": value_counts.index.tolist(),
+                        "datasets": [{"data": value_counts.values.tolist(), "backgroundColor": colors}]
+                    }
+                    
+            elif viz_type == "scatter_plot":
+                # Generate scatter plot data
+                numeric_cols = df.select_dtypes(include=[np.number]).columns
+                if len(numeric_cols) >= 2:
+                    viz_data["data"] = {
+                        "datasets": [{"label": f"{numeric_cols[0]} vs {numeric_cols[1]}", "data": [{"x": x, "y": y} for x, y in zip(df[numeric_cols[0]], df[numeric_cols[1]])], "backgroundColor": f"rgba({np.random.randint(0,255)},{np.random.randint(0,255)},{np.random.randint(0,255)},0.6)"}]
+                    }
+                    
+            elif viz_type == "heatmap":
+                # Generate correlation heatmap
+                numeric_cols = df.select_dtypes(include=[np.number]).columns
+                if len(numeric_cols) > 1:
+                    corr_matrix = df[numeric_cols].corr()
+                    viz_data["data"] = {
+                        "labels": numeric_cols.tolist(),
+                        "datasets": [{"label": "Correlation", "data": corr_matrix.values.tolist()}]
                     }
                     
             elif viz_type == "table":
                 # Generate table data
                 viz_data["data"] = {
                     "headers": df.columns.tolist(),
-                    "rows": df.head(10).values.tolist()
+                    "rows": df.head(20).values.tolist(),
+                    "total_rows": len(df)
+                }
+                
+            elif viz_type == "kpi_dashboard":
+                # Generate KPI dashboard data
+                kpis = analysis_result.get('supporting_data', {}).get('kpis', {})
+                viz_data["data"] = {
+                    "kpis": kpis.get('potential_kpis', []),
+                    "summary_stats": kpis.get('summary_stats', {}),
+                    "column_types": {
+                        "numeric": kpis.get('numeric_columns', []),
+                        "categorical": kpis.get('categorical_columns', []),
+                        "date": kpis.get('date_columns', [])
+                    }
+                }
+                
+            elif viz_type == "regression_plot":
+                # Generate regression visualization
+                if 'regression' in advanced_analysis:
+                    reg_data = advanced_analysis['regression']
+                    numeric_cols = df.select_dtypes(include=[np.number]).columns
+                    if len(numeric_cols) >= 2:
+                        viz_data["data"] = {
+                            "actual": df[numeric_cols[-1]].tolist(),
+                            "predicted": reg_data.get('predictions', []),
+                            "r_squared": reg_data.get('r_squared', 0),
+                            "coefficients": reg_data.get('coefficients', [])
+                        }
+                        
+            elif viz_type == "clustering_plot":
+                # Generate clustering visualization
+                if 'clustering' in advanced_analysis:
+                    cluster_data = advanced_analysis['clustering']
+                    numeric_cols = df.select_dtypes(include=[np.number]).columns
+                    if len(numeric_cols) >= 2:
+                        viz_data["data"] = {
+                            "x": df[numeric_cols[0]].tolist(),
+                            "y": df[numeric_cols[1]].tolist(),
+                            "clusters": cluster_data.get('cluster_labels', []),
+                            "centers": cluster_data.get('cluster_centers', [])
                 }
             
             return viz_data
@@ -335,3 +433,136 @@ class InsightService:
         except Exception as e:
             logger.error(f"Error generating visualization data: {str(e)}")
             return None 
+    
+    def auto_detect_kpis(self, df: pd.DataFrame) -> Dict[str, Any]:
+        """
+        Automatically detect KPIs and key metrics from the dataset.
+        
+        Args:
+            df: DataFrame to analyze
+            
+        Returns:
+            Dictionary with detected KPIs and metrics
+        """
+        try:
+            kpis = {
+                "numeric_columns": [],
+                "categorical_columns": [],
+                "date_columns": [],
+                "potential_kpis": [],
+                "summary_stats": {}
+            }
+            
+            # Detect column types
+            for col in df.columns:
+                if df[col].dtype in ['int64', 'float64']:
+                    kpis["numeric_columns"].append(col)
+                    # Calculate basic stats
+                    kpis["summary_stats"][col] = {
+                        "mean": float(df[col].mean()),
+                        "median": float(df[col].median()),
+                        "std": float(df[col].std()),
+                        "min": float(df[col].min()),
+                        "max": float(df[col].max()),
+                        "sum": float(df[col].sum())
+                    }
+                elif df[col].dtype == 'object':
+                    kpis["categorical_columns"].append(col)
+                elif pd.api.types.is_datetime64_any_dtype(df[col]):
+                    kpis["date_columns"].append(col)
+            
+            # Detect potential KPIs based on column names and patterns
+            kpi_keywords = ['revenue', 'sales', 'profit', 'cost', 'margin', 'growth', 'rate', 'percentage', 'ratio']
+            for col in kpis["numeric_columns"]:
+                col_lower = col.lower()
+                if any(keyword in col_lower for keyword in kpi_keywords):
+                    kpis["potential_kpis"].append({
+                        "column": col,
+                        "type": "financial" if any(word in col_lower for word in ['revenue', 'sales', 'profit', 'cost']) else "metric",
+                        "current_value": float(df[col].iloc[-1]) if len(df) > 0 else 0,
+                        "trend": "increasing" if len(df) > 1 and df[col].iloc[-1] > df[col].iloc[-2] else "decreasing"
+                    })
+            
+            return kpis
+            
+        except Exception as e:
+            logger.error(f"Error detecting KPIs: {str(e)}")
+            return {}
+    
+    def perform_advanced_analysis(self, df: pd.DataFrame, analysis_type: str) -> Dict[str, Any]:
+        """
+        Perform advanced statistical analysis on the data.
+        
+        Args:
+            df: DataFrame to analyze
+            analysis_type: Type of analysis to perform
+            
+        Returns:
+            Dictionary with analysis results
+        """
+        try:
+            results = {}
+            
+            if analysis_type == "regression":
+                # Simple linear regression analysis
+                numeric_cols = df.select_dtypes(include=[np.number]).columns
+                if len(numeric_cols) >= 2:
+                    X = df[numeric_cols[:-1]].values
+                    y = df[numeric_cols[-1]].values
+                    
+                    if len(X.shape) == 1:
+                        X = X.reshape(-1, 1)
+                    
+                    model = LinearRegression()
+                    model.fit(X, y)
+                    
+                    results["regression"] = {
+                        "coefficients": model.coef_.tolist(),
+                        "intercept": float(model.intercept_),
+                        "r_squared": float(model.score(X, y)),
+                        "predictions": model.predict(X).tolist()
+                    }
+            
+            elif analysis_type == "clustering":
+                # K-means clustering
+                numeric_cols = df.select_dtypes(include=[np.number]).columns
+                if len(numeric_cols) >= 2:
+                    X = df[numeric_cols].values
+                    scaler = StandardScaler()
+                    X_scaled = scaler.fit_transform(X)
+                    
+                    kmeans = KMeans(n_clusters=min(3, len(X)), random_state=42)
+                    clusters = kmeans.fit_predict(X_scaled)
+                    
+                    results["clustering"] = {
+                        "cluster_centers": kmeans.cluster_centers_.tolist(),
+                        "cluster_labels": clusters.tolist(),
+                        "inertia": float(kmeans.inertia_),
+                        "n_clusters": len(kmeans.cluster_centers_)
+                    }
+            
+            elif analysis_type == "forecasting":
+                # Simple time series forecasting
+                numeric_cols = df.select_dtypes(include=[np.number]).columns
+                if len(numeric_cols) > 0 and len(df) > 5:
+                    col = numeric_cols[0]
+                    values = df[col].values
+                    
+                    # Simple moving average forecast
+                    window = min(3, len(values) // 2)
+                    if window > 0:
+                        ma_forecast = np.convolve(values, np.ones(window)/window, mode='valid')
+                        trend = np.polyfit(range(len(values)), values, 1)
+                        
+                        results["forecasting"] = {
+                            "moving_average": ma_forecast.tolist(),
+                            "trend_coefficients": trend.tolist(),
+                            "next_prediction": float(values[-1] + trend[0]),
+                            "confidence_interval": [float(values[-1] * 0.9), float(values[-1] * 1.1)]
+                        }
+            
+            return results
+            
+        except Exception as e:
+            logger.error(f"Error performing advanced analysis: {str(e)}")
+            return {} 
