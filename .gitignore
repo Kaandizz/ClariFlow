@@ -1,2 +1,43 @@
-node_modules
-node_modules
+# Python
+__pycache__/
+*.py[cod]
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+
+# Virtual environments
+venv/
+ENV/
+.env/
+.venv/
+
+# Environment variables and secrets
+.env
+.env.*
+*.env
+
+# Database files
+*.db
+*.sqlite3
+backend/chroma_db/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+
+# VSCode
+.vscode/
+
+# Node modules
+node_modules/
+
+# Log files
+*.log
+
+# Other
+uploads/
