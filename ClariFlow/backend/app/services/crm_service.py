@@ -1,0 +1,501 @@
+ÿþimport json
+import hmac
+import hashlib
+from typing import Dict, Any, Optional, List
+from datetime import datetime
+import httpx
+from ..core.config import settings
+from ..utils.logger import setup_logger
+from ..models.crm import (
+    CRMType, WebhookEventType, WebhookPayload, HubSpotWebhookPayload,
+    CRMSyncRequest, CRMSyncResponse, CRMConnection, CRMConnectionCreate,
+    CRMConnectionUpdate, CRMConnectionList, WebhookVerificationRequest,
+    WebhookVerificationResponse
+)
+from ..models.lead import Lead, LeadCreate, LeadUpdate
+
+logger = setup_logger(__name__)
+
+class CRMService:
+    def __init__(self):
+        self.connections = {}  # In-memory storage for demo purposes
+        self.webhook_secrets = {}  # Store webhook secrets for verification
+        
+    async def create_connection(self, connection_data: CRMConnectionCreate) -> CRMConnection:
+        """
+        Create a new CRM connection.
+        
+        Args:
+            connection_data: Connection configuration data
+            
+        Returns:
+            CRMConnection object
+        """
+        try:
+            connection = CRMConnection(
+                crm_type=connection_data.crm_type,
+                name=connection_data.name,
+                api_key=connection_data.api_key,
+                api_url=connection_data.api_url,
+                webhook_url=connection_data.webhook_url,
+                sync_frequency=connection_data.sync_frequency
+            )
+            
+            self.connections[connection.id] = connection
+            
+            # Store webhook secret for verification
+            if connection_data.api_key:
+                self.webhook_secrets[connection.id] = connection_data.api_key
+            
+            logger.info(f"Created CRM connection: {connection.name} ({connection.crm_type.value})")
+            return connection
+            
+        except Exception as e:
+            logger.error(f"Error creating CRM connection: {str(e)}")
+            raise
+    
+    async def update_connection(self, connection_id: str, update_data: CRMConnectionUpdate) -> CRMConnection:
+        """
+        Update an existing CRM connection.
+        
+        Args:
+            connection_id: ID of the connection to update
+            update_data: Data to update
+            
+        Returns:
+            Updated CRMConnection
+        """
+        try:
+            if connection_id not in self.connections:
+                raise ValueError(f"Connection with ID {connection_id} not found")
+            
+            connection = self.connections[connection_id]
+            
+            # Update fields if provided
+            if update_data.name is not None:
+                connection.name = update_data.name
+            if update_data.api_key is not None:
+                connection.api_key = update_data.api_key
+                self.webhook_secrets[connection_id] = update_data.api_key
+            if update_data.api_url is not None:
+                connection.api_url = update_data.api_url
+            if update_data.webhook_url is not None:
+                connection.webhook_url = update_data.webhook_url
+            if update_data.is_active is not None:
+                connection.is_active = update_data.is_active
+            if update_data.sync_frequency is not None:
+                connection.sync_frequency = update_data.sync_frequency
+            
+            connection.updated_at = datetime.now()
+            
+            logger.info(f"Updated CRM connection: {connection.name}")
+            return connection
+            
+        except Exception as e:
+            logger.error(f"Error updating CRM connection {connection_id}: {str(e)}")
+            raise
+    
+    async def get_connections(self) -> CRMConnectionList:
+        """
+        Get all CRM connections.
+        
+        Returns:
+            CRMConnectionList with all connections
+        """
+        try:
+            connections = list(self.connections.values())
+            return CRMConnectionList(connections=connections, total_count=len(connections))
+            
+        except Exception as e:
+            logger.error(f"Error getting CRM connections: {str(e)}")
+            raise
+    
+    async def delete_connection(self, connection_id: str) -> bool:
+        """
+        Delete a CRM connection.
+        
+        Args:
+            connection_id: ID of the connection to delete
+            
+        Returns:
+            True if deleted successfully
+        """
+        try:
+            if connection_id not in self.connections:
+                raise ValueError(f"Connection with ID {connection_id} not found")
+            
+            connection_name = self.connections[connection_id].name
+            del self.connections[connection_id]
+            
+            # Remove webhook secret
+            if connection_id in self.webhook_secrets:
+                del self.webhook_secrets[connection_id]
+            
+            logger.info(f"Deleted CRM connection: {connection_name}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error deleting CRM connection {connection_id}: {str(e)}")
+            raise
+    
+    async def sync_crm_data(self, sync_request: CRMSyncRequest) -> CRMSyncResponse:
+        """
+        Sync data with external CRM system.
+        
+        Args:
+            sync_request: Sync configuration and parameters
+            
+        Returns:
+            CRMSyncResponse with sync results
+        """
+        try:
+            logger.info(f"Starting CRM sync for {sync_request.crm_type.value}")
+            
+            # Find active connection for this CRM type
+            connection = None
+            for conn in self.connections.values():
+                if conn.crm_type == sync_request.crm_type and conn.is_active:
+                    connection = conn
+                    break
+            
+            if not connection:
+                raise ValueError(f"No active connection found for {sync_request.crm_type.value}")
+            
+            # Perform sync based on CRM type
+            if sync_request.crm_type == CRMType.HUBSPOT:
+                result = await self._sync_hubspot(connection, sync_request)
+            elif sync_request.crm_type == CRMType.SALESFORCE:
+                result = await self._sync_salesforce(connection, sync_request)
+            else:
+                result = await self._sync_generic(connection, sync_request)
+            
+            # Update connection last sync time
+            connection.last_sync = datetime.now()
+            
+            logger.info(f"CRM sync completed: {result.synced_count} records synced")
+            return result
+            
+        except Exception as e:
+            logger.error(f"Error syncing CRM data: {str(e)}")
+            raise
+    
+    async def _sync_hubspot(self, connection: CRMConnection, sync_request: CRMSyncRequest) -> CRMSyncResponse:
+        """Sync data with HubSpot."""
+        try:
+            # This is a simplified implementation
+            # In a real scenario, you would use the HubSpot API
+            synced_count = 0
+            errors = []
+            
+            # Simulate API calls
+            if sync_request.sync_all or sync_request.entity_type == "contacts":
+                # Sync contacts
+                synced_count += 10  # Simulated count
+                
+            if sync_request.sync_all or sync_request.entity_type == "deals":
+                # Sync deals
+                synced_count += 5  # Simulated count
+            
+            return CRMSyncResponse(
+                success=True,
+                message=f"Successfully synced {synced_count} records from HubSpot",
+                synced_count=synced_count,
+                errors=errors if errors else None
+            )
+            
+        except Exception as e:
+            return CRMSyncResponse(
+                success=False,
+                message=f"HubSpot sync failed: {str(e)}",
+                synced_count=0,
+                errors=[str(e)]
+            )
+    
+    async def _sync_salesforce(self, connection: CRMConnection, sync_request: CRMSyncRequest) -> CRMSyncResponse:
+        """Sync data with Salesforce."""
+        try:
+            # This is a simplified implementation
+            # In a real scenario, you would use the Salesforce API
+            synced_count = 0
+            errors = []
+            
+            # Simulate API calls
+            if sync_request.sync_all or sync_request.entity_type == "leads":
+                # Sync leads
+                synced_count += 15  # Simulated count
+                
+            if sync_request.sync_all or sync_request.entity_type == "opportunities":
+                # Sync opportunities
+                synced_count += 8  # Simulated count
+            
+            return CRMSyncResponse(
+                success=True,
+                message=f"Successfully synced {synced_count} records from Salesforce",
+                synced_count=synced_count,
+                errors=errors if errors else None
+            )
+            
+        except Exception as e:
+            return CRMSyncResponse(
+                success=False,
+                message=f"Salesforce sync failed: {str(e)}",
+                synced_count=0,
+                errors=[str(e)]
+            )
+    
+    async def _sync_generic(self, connection: CRMConnection, sync_request: CRMSyncRequest) -> CRMSyncResponse:
+        """Sync data with generic CRM system."""
+        try:
+            # Generic sync implementation
+            synced_count = 0
+            errors = []
+            
+            # Simulate API calls
+            if connection.api_url:
+                # Make API call to external CRM
+                async with httpx.AsyncClient() as client:
+                    response = await client.get(
+                        f"{connection.api_url}/api/entities",
+                        headers={"Authorization": f"Bearer {connection.api_key}"} if connection.api_key else {}
+                    )
+                    
+                    if response.status_code == 200:
+                        data = response.json()
+                        synced_count = len(data.get("entities", []))
+                    else:
+                        errors.append(f"API call failed with status {response.status_code}")
+            
+            return CRMSyncResponse(
+                success=len(errors) == 0,
+                message=f"Successfully synced {synced_count} records from {connection.crm_type.value}",
+                synced_count=synced_count,
+                errors=errors if errors else None
+            )
+            
+        except Exception as e:
+            return CRMSyncResponse(
+                success=False,
+                message=f"Generic CRM sync failed: {str(e)}",
+                synced_count=0,
+                errors=[str(e)]
+            )
+    
+    async def handle_webhook(self, crm_type: CRMType, payload: Dict[str, Any], signature: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Handle incoming webhook from CRM system.
+        
+        Args:
+            crm_type: Type of CRM system
+            payload: Webhook payload data
+            signature: Webhook signature for verification
+            
+        Returns:
+            Processing result
+        """
+        try:
+            logger.info(f"Processing webhook from {crm_type.value}")
+            
+            # Verify webhook signature if provided
+            if signature and not self._verify_webhook_signature(crm_type, payload, signature):
+                raise ValueError("Invalid webhook signature")
+            
+            # Process webhook based on CRM type
+            if crm_type == CRMType.HUBSPOT:
+                result = await self._process_hubspot_webhook(payload)
+            elif crm_type == CRMType.SALESFORCE:
+                result = await self._process_salesforce_webhook(payload)
+            else:
+                result = await self._process_generic_webhook(payload)
+            
+            logger.info(f"Webhook processed successfully: {result}")
+            return result
+            
+        except Exception as e:
+            logger.error(f"Error processing webhook: {str(e)}")
+            raise
+    
+    def _verify_webhook_signature(self, crm_type: CRMType, payload: Dict[str, Any], signature: str) -> bool:
+        """Verify webhook signature for security."""
+        try:
+            # Find connection for this CRM type
+            connection = None
+            for conn in self.connections.values():
+                if conn.crm_type == crm_type:
+                    connection = conn
+                    break
+            
+            if not connection or connection.id not in self.webhook_secrets:
+                return False
+            
+            secret = self.webhook_secrets[connection.id]
+            
+            # Create expected signature
+            payload_str = json.dumps(payload, sort_keys=True)
+            expected_signature = hmac.new(
+                secret.encode('utf-8'),
+                payload_str.encode('utf-8'),
+                hashlib.sha256
+            ).hexdigest()
+            
+            return hmac.compare_digest(signature, expected_signature)
+            
+        except Exception as e:
+            logger.error(f"Error verifying webhook signature: {str(e)}")
+            return False
+    
+    async def _process_hubspot_webhook(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Process HubSpot webhook payload."""
+        try:
+            # Parse HubSpot webhook data
+            webhook_data = HubSpotWebhookPayload(**payload)
+            
+            # Determine event type
+            event_type = self._map_hubspot_event_type(webhook_data.subscription_type, webhook_data.object_type)
+            
+            # Process based on event type
+            if event_type == WebhookEventType.CONTACT_CREATED:
+                # Create new lead/contact
+                lead_data = await self._extract_lead_from_hubspot(webhook_data)
+                # TODO: Save to database
+                
+            elif event_type == WebhookEventType.CONTACT_UPDATED:
+                # Update existing lead/contact
+                lead_data = await self._extract_lead_from_hubspot(webhook_data)
+                # TODO: Update in database
+                
+            elif event_type == WebhookEventType.DEAL_CREATED:
+                # Create new deal/opportunity
+                deal_data = await self._extract_deal_from_hubspot(webhook_data)
+                # TODO: Save to database
+            
+            return {
+                "success": True,
+                "event_type": event_type.value,
+                "object_id": webhook_data.object_id,
+                "processed_at": datetime.now().isoformat()
+            }
+            
+        except Exception as e:
+            logger.error(f"Error processing HubSpot webhook: {str(e)}")
+            return {
+                "success": False,
+                "error": str(e),
+                "processed_at": datetime.now().isoformat()
+            }
+    
+    async def _process_salesforce_webhook(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Process Salesforce webhook payload."""
+        try:
+            # Parse Salesforce webhook data
+            # This would be similar to HubSpot but with Salesforce-specific fields
+            
+            return {
+                "success": True,
+                "event_type": "lead_updated",  # Example
+                "object_id": payload.get("Id"),
+                "processed_at": datetime.now().isoformat()
+            }
+            
+        except Exception as e:
+            logger.error(f"Error processing Salesforce webhook: {str(e)}")
+            return {
+                "success": False,
+                "error": str(e),
+                "processed_at": datetime.now().isoformat()
+            }
+    
+    async def _process_generic_webhook(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Process generic webhook payload."""
+        try:
+            # Generic webhook processing
+            event_type = payload.get("event_type", "unknown")
+            object_id = payload.get("object_id")
+            
+            return {
+                "success": True,
+                "event_type": event_type,
+                "object_id": object_id,
+                "processed_at": datetime.now().isoformat()
+            }
+            
+        except Exception as e:
+            logger.error(f"Error processing generic webhook: {str(e)}")
+            return {
+                "success": False,
+                "error": str(e),
+                "processed_at": datetime.now().isoformat()
+            }
+    
+    def _map_hubspot_event_type(self, subscription_type: str, object_type: str) -> WebhookEventType:
+        """Map HubSpot event types to internal event types."""
+        if subscription_type == "contact.creation":
+            return WebhookEventType.CONTACT_CREATED
+        elif subscription_type == "contact.propertyChange":
+            return WebhookEventType.CONTACT_UPDATED
+        elif subscription_type == "deal.creation":
+            return WebhookEventType.DEAL_CREATED
+        elif subscription_type == "deal.propertyChange":
+            return WebhookEventType.DEAL_UPDATED
+        else:
+            return WebhookEventType.LEAD_UPDATED  # Default
+    
+    async def _extract_lead_from_hubspot(self, webhook_data: HubSpotWebhookPayload) -> Dict[str, Any]:
+        """Extract lead data from HubSpot webhook."""
+        # This would make an API call to HubSpot to get full contact details
+        # For now, return basic structure
+        return {
+            "name": f"Contact {webhook_data.object_id}",
+            "email": f"contact{webhook_data.object_id}@example.com",
+            "source": "hubspot",
+            "hubspot_id": webhook_data.object_id
+        }
+    
+    async def _extract_deal_from_hubspot(self, webhook_data: HubSpotWebhookPayload) -> Dict[str, Any]:
+        """Extract deal data from HubSpot webhook."""
+        # This would make an API call to HubSpot to get full deal details
+        return {
+            "name": f"Deal {webhook_data.object_id}",
+            "amount": 0,
+            "stage": "new",
+            "hubspot_id": webhook_data.object_id
+        }
+    
+    async def verify_webhook(self, verification_request: WebhookVerificationRequest) -> WebhookVerificationResponse:
+        """
+        Verify webhook endpoint for CRM systems.
+        
+        Args:
+            verification_request: Verification request data
+            
+        Returns:
+            WebhookVerificationResponse
+        """
+        try:
+            # Handle different verification methods
+            if verification_request.challenge:
+                # HubSpot-style challenge
+                return WebhookVerificationResponse(
+                    success=True,
+                    message="Webhook verified successfully",
+                    challenge_response=verification_request.challenge
+                )
+            elif verification_request.verification_token:
+                # Generic token verification
+                return WebhookVerificationResponse(
+                    success=True,
+                    message="Webhook verified successfully",
+                    challenge_response="verified"
+                )
+            else:
+                return WebhookVerificationResponse(
+                    success=False,
+                    message="No verification method provided"
+                )
+                
+        except Exception as e:
+            logger.error(f"Error verifying webhook: {str(e)}")
+            return WebhookVerificationResponse(
+                success=False,
+                message=f"Verification failed: {str(e)}"
+            )
+ 
